@@ -11,14 +11,38 @@
   <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="locked">
   <header class="top">
     <h1>F&amp;A FINANÇAS</h1>
+    <div class="top-actions">
+    <button id="logout" class="btn-sair" type="button" aria-label="Sair da conta" title="Sair">SAIR</button>
     <button id="eye" class="icon-btn" aria-label="Ocultar ou mostrar valores" title="Ocultar/exibir valores">
       <svg id="eye-open" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
       <svg id="eye-closed" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" hidden><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><path d="M3 3l18 18"/></svg>
     </button>
+    </div>
   </header>
+
+  <section id="login" class="login" aria-label="Login">
+    <form id="login-form" class="login-box" autocomplete="off" novalidate>
+      <h1>F&amp;A FINANÇAS</h1>
+      <p class="login-sub">ACESSO RESTRITO</p>
+
+      <div class="field">
+        <label for="cpf">CPF</label>
+        <input id="cpf" name="cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00" autocomplete="off">
+      </div>
+      <div id="login-msg" class="login-msg" role="status" aria-live="polite"></div>
+
+      <div class="field">
+        <label for="senha">SENHA (6 DÍGITOS)</label>
+        <input id="senha" name="senha" type="password" inputmode="numeric" maxlength="6" placeholder="••••••" autocomplete="off">
+      </div>
+      <div id="login-err" class="login-err" role="alert"></div>
+
+      <button type="submit" class="btn primary block" id="entrar">ENTRAR</button>
+    </form>
+  </section>
 
   <main id="app" aria-live="polite"></main>
 
