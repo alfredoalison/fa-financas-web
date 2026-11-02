@@ -6,8 +6,8 @@ const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Servidor do bot (server.js), que lê a nota com o Gemini. Use '' se o PWA for servido pelo próprio bot.
 // API_TOKEN deve ser igual à variável API_TOKEN do .env do bot.
-const API_URL = 'https://SEU-BOT.onrender.com';
-const API_TOKEN = 'COLOQUE_O_TOKEN_AQUI';
+const API_URL = "https://fa-financas-bot.onrender.com";
+const API_TOKEN = "fa_token_seguro_2026";
 
 const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const TIPOS = ['DÉBITO', 'CRÉDITO', 'PIX', 'RECEITA'];
@@ -262,9 +262,6 @@ const blobParaBase64 = (blob) => new Promise((res, rej) => {
 async function processarScan() {
   const sc = state.scan;
   if (!sc || state.processando) return;
-  if (API_URL.includes('SEU-BOT') || API_TOKEN.includes('COLOQUE')) {
-    return toast('Configure API_URL e API_TOKEN no topo do app.js para extrair os dados.');
-  }
   state.processando = true;
   render();
   try {
@@ -272,7 +269,7 @@ async function processarScan() {
     if (blob.size > 12 * 1024 * 1024) throw new Error('Arquivo muito grande para enviar (máx. 12 MB). Tire a foto de novo.');
     const resp = await fetch(`${API_URL}/api/extrair`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-fa-token': API_TOKEN },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_TOKEN}` },
       body: JSON.stringify({ mime, data: await blobParaBase64(blob) }),
     });
     const json = await resp.json().catch(() => ({}));
