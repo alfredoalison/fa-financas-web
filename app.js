@@ -108,9 +108,9 @@ function resumoMes(mes) {
   return { ent, sai, cred, saldo: ent - sai };
 }
 
-const rowTx = (t) => {
+const rowTx = (t, clicavel = false) => {
   const rec = t.tipo_pagamento === 'RECEITA';
-  return `<div class="row"><div><b>${esc(t.estabelecimento || '—')}</b>
+  return `<div class="row${clicavel ? ' clicavel' : ''}"${clicavel ? ` data-tx="${esc(t.id)}" role="button" tabindex="0" aria-label="Ver detalhes de ${esc(t.estabelecimento || 'lançamento')}"` : ''}><div><b>${esc(t.estabelecimento || '—')}</b>
     <small>${brData(t.data_transacao)} · ${esc(userName(t.usuario_id))} · ${esc(t.tipo_pagamento)}${t.parcelado ? ` · ${t.parcela_atual}/${t.parcelas_totais}` : ''}</small></div>
     <span class="${rec ? 'pos' : 'neg'}">${rec ? '+' : '-'}${money(t.valor_total)}</span></div>`;
 };
@@ -135,7 +135,7 @@ function viewInicio() {
   <button class="btn primary block" id="novo" style="margin-bottom:16px">+ NOVO LANÇAMENTO</button>
   <section class="card">
     <h2>ÚLTIMOS LANÇAMENTOS</h2>
-    ${recentes.length ? recentes.map(rowTx).join('') : '<div class="empty">Nenhum lançamento ainda. Toque em "Novo lançamento" ou envie uma foto de nota no grupo.</div>'}
+    ${recentes.length ? recentes.map((t) => rowTx(t, true)).join('') : '<div class="empty">Nenhum lançamento ainda. Toque em "Novo lançamento" ou envie uma foto de nota no grupo.</div>'}
   </section>`;
 }
 
@@ -150,6 +150,7 @@ function viewFaturas() {
       return `<details><summary>${rowTx(t)}</summary>
         ${itens.length ? `<div class="itens">${itens.map((i) => `<div><span>${esc(i.quantidade)}x ${esc(i.nome_produto)}</span><span>${money(i.valor_total)}</span></div>`).join('')}</div>`
           : '<div class="itens">Sem itens detalhados.</div>'}
+        <button class="btn block" data-tx="${esc(t.id)}" style="margin-bottom:10px">DETALHES / EDITAR / EXCLUIR</button>
       </details>`;
     }).join('');
     return `<section class="card">
@@ -387,6 +388,129 @@ function openTxModal(pre = {}) {
   };
 }
 
+/* ---------- DETALHES / EDIÇÃO / EXCLUSÃO de lançamento ---------- */
+const numBR = (v) => parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || parseFloat(String(v).replace(',', '.')) || 0;
+
+// Parcelas da mesma compra: foram gravadas no mesmo insert (mesmo criado_em, cartão e total de parcelas).
+function grupoParcelas(t) {
+  if (!t.parcelado) return [t];
+  const g = state.transacoes.filter((x) => x.parcelado && x.criado_em === t.criado_em
+    && x.cartao_id === t.cartao_id && x.parcelas_totais === t.parcelas_totais);
+  return g.length ? g.sort((a, b) => a.parcela_atual - b.parcela_atual) : [t];
+}
+
+function openDetalheTx(id) {
+  const t = state.transacoes.find((x) => x.id === id);
+  if (!t) return;
+  const rec = t.tipo_pagamento === 'RECEITA';
+  const cat = state.categorias.find((c) => c.id === t.categoria_id)?.nome;
+  const cartao = state.cartoes.find((c) => c.id === t.cartao_id);
+  const itens = t.itens_transacao || [];
+  const grupo = grupoParcelas(t);
+  const linhas = [
+    ['TIPO', t.tipo_pagamento],
+    ['QUEM', state.usuarios.find((u) => u.id === t.usuario_id)?.nome || '—'],
+    ['DATA', brData(t.data_transacao)],
+    !rec && ['CATEGORIA', cat || '—'],
+    cartao && ['CARTÃO', cartao.nome_cartao],
+    t.fatura_mes_ano && ['FATURA', labelMes(t.fatura_mes_ano)],
+    t.parcelado && ['PARCELA', `${t.parcela_atual}/${t.parcelas_totais}`],
+  ].filter(Boolean);
+
+  const el = document.createElement('div');
+  el.className = 'modal-bg';
+  el.innerHTML = `<div class="modal" role="dialog" aria-label="Detalhes do lançamento">
+    <div class="modal-h"><b>DETALHES DO LANÇAMENTO</b><button type="button" class="x" aria-label="Fechar">X</button></div>
+    <div class="det-top"><b>${esc(t.estabelecimento || '—')}</b>
+      <span class="det-valor ${rec ? 'pos' : 'neg'}">${rec ? '+' : '-'}${money(t.valor_total)}</span></div>
+    ${linhas.map(([k, v]) => `<div class="det-row"><small>${k}</small><b>${esc(v)}</b></div>`).join('')}
+    ${itens.length ? `<h2 style="margin:14px 0 8px;font-size:13px;color:var(--mut)">ITENS DA NOTA</h2>
+      <div class="itens">${itens.map((i) => `<div><span>${esc(i.quantidade)}x ${esc(i.nome_produto)}</span><span>${money(i.valor_total)}</span></div>`).join('')}</div>` : ''}
+    <div class="actions" style="margin-top:16px"><button type="button" class="btn primary" data-a="edit">EDITAR</button></div>
+    <div class="actions">
+      ${grupo.length > 1
+        ? `<button type="button" class="btn danger" data-a="del1">EXCLUIR SÓ ESTA PARCELA</button>
+           <button type="button" class="btn danger" data-a="delN">EXCLUIR TODAS (${grupo.length})</button>`
+        : '<button type="button" class="btn danger" data-a="del1">EXCLUIR</button>'}
+    </div>
+  </div>`;
+  document.body.appendChild(el);
+  const close = () => el.remove();
+  el.querySelector('.x').onclick = close;
+  el.onclick = (e) => { if (e.target === el) close(); };
+
+  const excluir = async (ids, msg) => {
+    if (!confirm(msg)) return;
+    const { error } = await db.from('transacoes').delete().in('id', ids);
+    if (error) return toast('Não consegui excluir: ' + error.message);
+    close();
+    await refresh();
+  };
+  const nome = t.estabelecimento || 'este lançamento';
+  const e1 = el.querySelector('[data-a=edit]'); if (e1) e1.onclick = () => { close(); openEditTxModal(t); };
+  const d1 = el.querySelector('[data-a=del1]');
+  if (d1) d1.onclick = () => excluir([t.id], grupo.length > 1
+    ? `Excluir só a parcela ${t.parcela_atual}/${t.parcelas_totais} de "${nome}"?`
+    : `Excluir "${nome}" (${Number(t.valor_total).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })})? Não dá para desfazer.`);
+  const dn = el.querySelector('[data-a=delN]');
+  if (dn) dn.onclick = () => excluir(grupo.map((x) => x.id), `Excluir TODAS as ${grupo.length} parcelas de "${nome}"? Não dá para desfazer.`);
+}
+
+function openEditTxModal(t) {
+  const grupo = grupoParcelas(t);
+  const { el } = openModal('EDITAR LANÇAMENTO', `
+    <div class="field"><label>TIPO</label><select name="tipo">${TIPOS.map((x) => `<option>${x}</option>`).join('')}</select></div>
+    <div class="field"><label>QUEM</label><select name="usuario">${optionsHtml(state.usuarios, 'nome', t.usuario_id)}</select></div>
+    <div class="field"><label>VALOR${grupo.length > 1 ? ' DESTA PARCELA' : ' TOTAL'} (R$)</label><input name="valor" inputmode="decimal" value="${Number(t.valor_total).toFixed(2).replace('.', ',')}" required></div>
+    <div class="field cred hidden"><label>CARTÃO</label><select name="cartao">${optionsHtml(state.cartoes, 'nome_cartao', t.cartao_id)}</select></div>
+    <div class="field cat"><label>CATEGORIA</label><select name="categoria"><option value="">—</option>${optionsHtml(state.categorias, 'nome', t.categoria_id)}</select></div>
+    <div class="field"><label>ESTABELECIMENTO / DESCRIÇÃO</label><input name="estab" value="${esc(t.estabelecimento || '')}"></div>
+    <div class="field"><label>DATA</label><input name="data" type="date" value="${esc(t.data_transacao)}" required></div>
+    ${grupo.length > 1 ? `<div class="field"><label>APLICAR DESCRIÇÃO, CATEGORIA E QUEM A</label>
+      <select name="escopo"><option value="todas">TODAS AS ${grupo.length} PARCELAS</option><option value="uma">SÓ ESTA PARCELA</option></select></div>
+      <small style="color:var(--mut)">Valor, data e cartão mudam só nesta parcela (${t.parcela_atual}/${t.parcelas_totais}).</small>` : ''}`,
+  async (fd) => {
+    const tipo = fd.get('tipo');
+    const valor = numBR(fd.get('valor'));
+    if (!(valor > 0)) throw new Error('Informe um valor maior que zero.');
+    if (grupo.length > 1 && tipo !== 'CRÉDITO') {
+      throw new Error('Para mudar o tipo de uma compra parcelada, exclua as parcelas e lance de novo.');
+    }
+    const data = fd.get('data');
+    const comum = {
+      usuario_id: fd.get('usuario'),
+      categoria_id: tipo === 'RECEITA' ? null : (fd.get('categoria') || null),
+      estabelecimento: (fd.get('estab') || '').trim() || null,
+    };
+    const propria = { ...comum, tipo_pagamento: tipo, valor_total: valor, data_transacao: data };
+    if (tipo === 'CRÉDITO') {
+      const cartao = state.cartoes.find((c) => c.id === fd.get('cartao'));
+      if (!cartao) throw new Error('Escolha um cartão.');
+      const fat = calcularFatura(data, cartao.dia_fechamento, cartao.dia_vencimento);
+      Object.assign(propria, { cartao_id: cartao.id, fatura_mes_ano: addMonths(fat, (t.parcela_atual || 1) - 1) });
+      if (!t.parcelado) Object.assign(propria, { parcelado: false, parcela_atual: null, parcelas_totais: null });
+    } else {
+      Object.assign(propria, { cartao_id: null, fatura_mes_ano: null, parcelado: false, parcela_atual: null, parcelas_totais: null });
+    }
+    const { error } = await db.from('transacoes').update(propria).eq('id', t.id);
+    if (error) throw error;
+    const outros = grupo.filter((x) => x.id !== t.id).map((x) => x.id);
+    if (outros.length && fd.get('escopo') !== 'uma') {
+      const { error: e2 } = await db.from('transacoes').update(comum).in('id', outros);
+      if (e2) throw e2;
+    }
+  });
+
+  const sel = $('[name=tipo]', el);
+  const toggle = () => {
+    el.querySelectorAll('.cred').forEach((f) => f.classList.toggle('hidden', sel.value !== 'CRÉDITO'));
+    $('.cat', el).classList.toggle('hidden', sel.value === 'RECEITA');
+  };
+  sel.value = t.tipo_pagamento;
+  sel.onchange = toggle;
+  toggle();
+}
+
 function openMetaModal() {
   openModal('NOVA CAIXINHA', `
     <div class="field"><label>NOME DA META</label><input name="nome" required></div>
@@ -428,6 +552,10 @@ function bindView() {
     const { error } = await db.from('metas_poupanca').delete().eq('id', b.dataset.del);
     if (error) toast(error.message); else refresh();
   }));
+  document.querySelectorAll('[data-tx]').forEach((b) => {
+    b.onclick = () => openDetalheTx(b.dataset.tx);
+    b.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetalheTx(b.dataset.tx); } };
+  });
   bindScan();
 }
 
