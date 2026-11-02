@@ -1,0 +1,358 @@
+/* F&A Finanças - app.js */
+const SUPABASE_URL = 'https://gczblziaqigyfciedvxa.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_0tnbe4SkERpWhmA4S0pPGw_ozv2ksSC';
+// Apenas a chave anon/publishable fica no front-end. A service role key NUNCA deve entrar aqui.
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+const TIPOS = ['DÉBITO', 'CRÉDITO', 'PIX', 'RECEITA'];
+
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = (n) => String(n).padStart(2, '0');
+function hoje() { return new Date().toLocaleDateString('en-CA'); }
+
+const state = {
+  usuarios: [], cartoes: [], categorias: [], transacoes: [], metas: [],
+  hidden: localStorage.getItem('fa_hidden') === '1',
+  mes: hoje().slice(0, 7),
+  view: 'inicio',
+  scanner: null,
+};
+
+/* ---------- utilidades ---------- */
+const money = (v) => state.hidden ? 'R$ ••••••' : Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const brData = (iso) => String(iso || '').split('-').reverse().join('/');
+const userName = (id) => (state.usuarios.find((u) => u.id === id)?.nome || '—').split(' ')[0];
+const labelMes = (ym) => { const [y, m] = ym.split('-').map(Number); return `${MESES[m - 1]} ${y}`; };
+
+function addMonths(ym, n) {
+  let [y, m] = ym.split('-').map(Number);
+  m += n - 1;
+  y += Math.floor(m / 12);
+  m = ((m % 12) + 12) % 12 + 1;
+  return `${y}-${pad(m)}`;
+}
+
+// Mês (YYYY-MM) de vencimento da fatura que recebe a compra. Mesma regra do bot.
+function calcularFatura(dataISO, diaFech, diaVenc) {
+  const [y, m, d] = dataISO.split('-').map(Number);
+  let fy = y, fm = m;
+  if (d > diaFech) { fm++; if (fm > 12) { fm = 1; fy++; } }
+  let vy = fy, vm = fm;
+  if (diaVenc <= diaFech) { vm++; if (vm > 12) { vm = 1; vy++; } }
+  return `${vy}-${pad(vm)}`;
+}
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 4500);
+}
+
+/* ---------- dados ---------- */
+async function loadAll() {
+  const [u, c, cat, t, m] = await Promise.all([
+    db.from('usuarios').select('*').order('nome'),
+    db.from('cartoes_credito').select('*').order('nome_cartao'),
+    db.from('categorias').select('*').order('nome'),
+    db.from('transacoes').select('*, itens_transacao(*)').order('data_transacao', { ascending: false }).limit(2000),
+    db.from('metas_poupanca').select('*').order('data_limite', { ascending: true, nullsFirst: false }),
+  ]);
+  for (const r of [u, c, cat, t, m]) if (r.error) throw r.error;
+  Object.assign(state, { usuarios: u.data, cartoes: c.data, categorias: cat.data, transacoes: t.data, metas: m.data });
+}
+
+async function refresh() {
+  try { await loadAll(); } catch (e) { toast('Erro ao carregar dados: ' + (e.message || e)); }
+  render();
+}
+
+/* ---------- navegação ---------- */
+function setView(v) {
+  if (state.view === 'escanear' && v !== 'escanear') stopScanner();
+  state.view = v;
+  document.querySelectorAll('.bottom button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
+  render();
+  window.scrollTo(0, 0);
+}
+
+function render() {
+  $('#eye-open').hidden = state.hidden;
+  $('#eye-closed').hidden = !state.hidden;
+  const app = $('#app');
+  if (state.view === 'inicio') app.innerHTML = viewInicio();
+  else if (state.view === 'faturas') app.innerHTML = viewFaturas();
+  else if (state.view === 'metas') app.innerHTML = viewMetas();
+  else app.innerHTML = viewEscanear();
+  bindView();
+}
+
+/* ---------- INÍCIO ---------- */
+function resumoMes(mes) {
+  let ent = 0, sai = 0, cred = 0;
+  for (const t of state.transacoes) {
+    const v = Number(t.valor_total);
+    if (t.tipo_pagamento === 'CRÉDITO') { if (t.fatura_mes_ano === mes) cred += v; }
+    else if (t.data_transacao.startsWith(mes)) { if (t.tipo_pagamento === 'RECEITA') ent += v; else sai += v; }
+  }
+  return { ent, sai, cred, saldo: ent - sai };
+}
+
+const rowTx = (t) => {
+  const rec = t.tipo_pagamento === 'RECEITA';
+  return `<div class="row"><div><b>${esc(t.estabelecimento || '—')}</b>
+    <small>${brData(t.data_transacao)} · ${esc(userName(t.usuario_id))} · ${esc(t.tipo_pagamento)}${t.parcelado ? ` · ${t.parcela_atual}/${t.parcelas_totais}` : ''}</small></div>
+    <span class="${rec ? 'pos' : 'neg'}">${rec ? '+' : '-'}${money(t.valor_total)}</span></div>`;
+};
+
+function monthNav() {
+  return `<div class="mes-nav"><button data-mes="-1" aria-label="Mês anterior">&lt;</button><span>${labelMes(state.mes)}</span><button data-mes="1" aria-label="Próximo mês">&gt;</button></div>`;
+}
+
+function viewInicio() {
+  const r = resumoMes(state.mes);
+  const recentes = state.transacoes.slice(0, 10);
+  return `${monthNav()}
+  <section class="card">
+    <h2>SALDO GERAL</h2>
+    <p class="saldo ${r.saldo >= 0 ? 'pos' : 'neg'}">${money(r.saldo)}</p>
+    <div class="grid3">
+      <div class="stat"><small>ENTRADAS</small><b class="pos">${money(r.ent)}</b></div>
+      <div class="stat"><small>DÉBITO/PIX</small><b class="neg">${money(r.sai)}</b></div>
+      <div class="stat"><small>FATURA CRÉDITO</small><b class="neg">${money(r.cred)}</b></div>
+    </div>
+  </section>
+  <button class="btn primary block" id="novo" style="margin-bottom:16px">+ NOVO LANÇAMENTO</button>
+  <section class="card">
+    <h2>ÚLTIMOS LANÇAMENTOS</h2>
+    ${recentes.length ? recentes.map(rowTx).join('') : '<div class="empty">Nenhum lançamento ainda. Toque em "Novo lançamento" ou envie uma foto de nota no grupo.</div>'}
+  </section>`;
+}
+
+/* ---------- FATURAS ---------- */
+function viewFaturas() {
+  const cards = state.cartoes.map((c) => {
+    const txs = state.transacoes.filter((t) => t.cartao_id === c.id && t.fatura_mes_ano === state.mes);
+    const total = txs.reduce((s, t) => s + Number(t.valor_total), 0);
+    const venc = `${pad(c.dia_vencimento)}/${state.mes.split('-')[1]}/${state.mes.split('-')[0]}`;
+    const lista = txs.map((t) => {
+      const itens = (t.itens_transacao || []);
+      return `<details><summary>${rowTx(t)}</summary>
+        ${itens.length ? `<div class="itens">${itens.map((i) => `<div><span>${esc(i.quantidade)}x ${esc(i.nome_produto)}</span><span>${money(i.valor_total)}</span></div>`).join('')}</div>`
+          : '<div class="itens">Sem itens detalhados.</div>'}
+      </details>`;
+    }).join('');
+    return `<section class="card">
+      <div class="fatura-head"><h2 style="margin:0">${esc(c.nome_cartao).toUpperCase()}</h2><b class="neg">${money(total)}</b></div>
+      <small style="color:var(--mut)">Vence em ${venc} · fecha dia ${c.dia_fechamento}</small>
+      <div style="margin-top:8px">${lista || '<div class="empty">Sem compras nesta fatura.</div>'}</div>
+    </section>`;
+  }).join('');
+  return `${monthNav()}${cards || '<div class="empty">Nenhum cartão cadastrado.</div>'}`;
+}
+
+/* ---------- METAS ---------- */
+function viewMetas() {
+  const cards = state.metas.map((m) => {
+    const alvo = Number(m.valor_alvo), atual = Number(m.valor_atual);
+    const pct = Math.min(100, alvo ? (atual / alvo) * 100 : 0);
+    const resta = Math.max(0, alvo - atual);
+    return `<section class="card">
+      <div class="fatura-head"><h2 style="margin:0">${esc(m.nome_meta).toUpperCase()}</h2><b class="pos">${pct.toFixed(0)}%</b></div>
+      <div class="bar" role="progressbar" aria-valuenow="${pct.toFixed(0)}" aria-valuemin="0" aria-valuemax="100"><div class="fill" style="width:${pct}%"></div></div>
+      <div class="meta-info"><span>${money(atual)} de ${money(alvo)}</span><span>Faltam ${money(resta)}</span></div>
+      ${m.data_limite ? `<div class="meta-info" style="margin-top:4px"><span>Prazo: ${brData(m.data_limite)}</span></div>` : ''}
+      <div class="meta-actions">
+        <button class="btn primary" data-dep="${m.id}">+ DEPOSITAR</button>
+        <button class="btn danger" data-del="${m.id}">EXCLUIR</button>
+      </div>
+    </section>`;
+  }).join('');
+  return `<button class="btn primary block" id="nova-meta" style="margin-bottom:16px">+ NOVA CAIXINHA</button>
+    ${cards || '<div class="empty">Nenhuma caixinha criada. Crie uma meta para começar a poupar.</div>'}`;
+}
+
+/* ---------- ESCANEAR ---------- */
+function viewEscanear() {
+  return `<section class="card">
+    <h2>LEITOR DE QR CODE</h2>
+    <div id="reader"></div>
+    <div class="actions">
+      <button class="btn primary" id="scan-start">ABRIR CÂMERA</button>
+      <button class="btn" id="scan-stop">PARAR</button>
+    </div>
+    <div id="scan-out"></div>
+  </section>
+  <section class="card">
+    <h2>NOTA SEM QR CODE?</h2>
+    <p style="margin:0 0 12px">Envie a foto da nota no grupo "F&amp;A Finanças" do WhatsApp. O bot lê os itens e lança sozinho. Na legenda, escreva "pix", "debito" ou "credito nubank 3x" para indicar o pagamento.</p>
+    <button class="btn block" id="novo">LANÇAR MANUALMENTE</button>
+  </section>`;
+}
+
+async function startScanner() {
+  stopScanner();
+  try {
+    state.scanner = new Html5Qrcode('reader');
+    await state.scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: 240 }, async (texto) => {
+      await stopScanner();
+      const isUrl = /^https?:\/\//i.test(texto);
+      $('#scan-out').innerHTML = `<div class="scan-out"><b>QR lido:</b><br>${esc(texto)}
+        <div class="actions" style="margin-top:10px">
+          ${isUrl ? `<a class="btn" href="${esc(texto)}" target="_blank" rel="noopener noreferrer">ABRIR NOTA</a>` : ''}
+          <button class="btn primary" id="scan-launch">LANÇAR</button>
+        </div></div>`;
+      $('#scan-launch').onclick = () => openTxModal({ estab: isUrl ? 'NFC-e (QR Code)' : texto.slice(0, 60) });
+    }, () => {});
+  } catch (e) {
+    toast('Não foi possível abrir a câmera. Libere a permissão no navegador e use HTTPS ou localhost.');
+  }
+}
+
+async function stopScanner() {
+  const s = state.scanner;
+  state.scanner = null;
+  if (s) { try { await s.stop(); s.clear(); } catch (_) { /* já parado */ } }
+}
+
+/* ---------- Modais ---------- */
+function openModal(title, bodyHtml, onSubmit) {
+  const el = document.createElement('div');
+  el.className = 'modal-bg';
+  el.innerHTML = `<form class="modal"><div class="modal-h"><b>${esc(title)}</b><button type="button" class="x" aria-label="Fechar">X</button></div>
+    ${bodyHtml}
+    <div class="actions"><button type="button" class="btn x">CANCELAR</button><button class="btn primary">SALVAR</button></div></form>`;
+  document.body.appendChild(el);
+  const close = () => el.remove();
+  el.querySelectorAll('.x').forEach((b) => (b.onclick = close));
+  const form = $('form', el);
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await onSubmit(new FormData(form)); close(); await refresh(); }
+    catch (err) { toast(err.message || String(err)); }
+  };
+  return { el, form, close };
+}
+
+const optionsHtml = (arr, label, sel) => arr.map((o) => `<option value="${esc(o.id)}"${o.id === sel ? ' selected' : ''}>${esc(o[label])}</option>`).join('');
+
+function openTxModal(pre = {}) {
+  const lastUser = localStorage.getItem('fa_user');
+  const { el } = openModal('NOVO LANÇAMENTO', `
+    <div class="field"><label>TIPO</label><select name="tipo">${TIPOS.map((t) => `<option>${t}</option>`).join('')}</select></div>
+    <div class="field"><label>QUEM</label><select name="usuario">${optionsHtml(state.usuarios, 'nome', lastUser)}</select></div>
+    <div class="field"><label>VALOR TOTAL (R$)</label><input name="valor" inputmode="decimal" placeholder="0,00" required></div>
+    <div class="field cred hidden"><label>CARTÃO</label><select name="cartao">${optionsHtml(state.cartoes, 'nome_cartao')}</select></div>
+    <div class="field cred hidden"><label>PARCELAS</label><input name="parcelas" type="number" min="1" max="24" value="1"></div>
+    <div class="field cat"><label>CATEGORIA</label><div class="inline"><select name="categoria">${optionsHtml(state.categorias, 'nome')}</select><button type="button" class="btn" id="nova-cat">+ NOVA</button></div></div>
+    <div class="field"><label>ESTABELECIMENTO / DESCRIÇÃO</label><input name="estab" value="${esc(pre.estab || '')}"></div>
+    <div class="field"><label>DATA</label><input name="data" type="date" value="${hoje()}" required></div>`,
+  async (fd) => {
+    const tipo = fd.get('tipo');
+    const valor = parseFloat(String(fd.get('valor')).replace(/\./g, '').replace(',', '.')) || parseFloat(String(fd.get('valor')).replace(',', '.'));
+    if (!(valor > 0)) throw new Error('Informe um valor maior que zero.');
+    const data = fd.get('data');
+    const base = {
+      usuario_id: fd.get('usuario'),
+      tipo_pagamento: tipo,
+      categoria_id: tipo === 'RECEITA' ? null : (fd.get('categoria') || null),
+      estabelecimento: (fd.get('estab') || '').trim() || null,
+      data_transacao: data,
+    };
+    localStorage.setItem('fa_user', base.usuario_id);
+    const rows = [];
+    if (tipo === 'CRÉDITO') {
+      const cartao = state.cartoes.find((c) => c.id === fd.get('cartao'));
+      if (!cartao) throw new Error('Escolha um cartão.');
+      const n = Math.max(1, parseInt(fd.get('parcelas'), 10) || 1);
+      const fat = calcularFatura(data, cartao.dia_fechamento, cartao.dia_vencimento);
+      const cents = Math.round(valor * 100), parte = Math.floor(cents / n);
+      for (let i = 0; i < n; i++) {
+        const c = i === n - 1 ? cents - parte * (n - 1) : parte;
+        rows.push({ ...base, cartao_id: cartao.id, fatura_mes_ano: addMonths(fat, i), valor_total: c / 100, parcelado: n > 1, parcela_atual: i + 1, parcelas_totais: n });
+      }
+    } else {
+      rows.push({ ...base, valor_total: valor, parcelado: false });
+    }
+    const { error } = await db.from('transacoes').insert(rows);
+    if (error) throw error;
+  });
+
+  const sel = $('[name=tipo]', el);
+  const toggle = () => {
+    el.querySelectorAll('.cred').forEach((f) => f.classList.toggle('hidden', sel.value !== 'CRÉDITO'));
+    $('.cat', el).classList.toggle('hidden', sel.value === 'RECEITA');
+  };
+  sel.onchange = toggle;
+  toggle();
+
+  $('#nova-cat', el).onclick = async () => {
+    const nome = (prompt('Nome da nova categoria:') || '').trim();
+    if (!nome) return;
+    const { data, error } = await db.from('categorias').insert({ nome }).select().single();
+    if (error) return toast(error.message);
+    state.categorias.push(data);
+    const s = $('[name=categoria]', el);
+    s.insertAdjacentHTML('beforeend', `<option value="${esc(data.id)}">${esc(data.nome)}</option>`);
+    s.value = data.id;
+  };
+}
+
+function openMetaModal() {
+  openModal('NOVA CAIXINHA', `
+    <div class="field"><label>NOME DA META</label><input name="nome" required></div>
+    <div class="field"><label>VALOR ALVO (R$)</label><input name="alvo" inputmode="decimal" required></div>
+    <div class="field"><label>JÁ GUARDADO (R$)</label><input name="atual" inputmode="decimal" value="0"></div>
+    <div class="field"><label>DATA LIMITE (OPCIONAL)</label><input name="limite" type="date"></div>`,
+  async (fd) => {
+    const num = (v) => parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || 0;
+    const alvo = num(fd.get('alvo'));
+    if (!(alvo > 0)) throw new Error('O valor alvo precisa ser maior que zero.');
+    const { error } = await db.from('metas_poupanca').insert({
+      nome_meta: fd.get('nome').trim(), valor_alvo: alvo, valor_atual: num(fd.get('atual')), data_limite: fd.get('limite') || null,
+    });
+    if (error) throw error;
+  });
+}
+
+function openDepositModal(id) {
+  const meta = state.metas.find((m) => m.id === id);
+  if (!meta) return;
+  openModal(`DEPOSITAR EM ${meta.nome_meta.toUpperCase()}`, `
+    <div class="field"><label>VALOR (R$)</label><input name="valor" inputmode="decimal" required></div>`,
+  async (fd) => {
+    const v = parseFloat(String(fd.get('valor')).replace(/\./g, '').replace(',', '.'));
+    if (!(v > 0)) throw new Error('Informe um valor maior que zero.');
+    const { error } = await db.from('metas_poupanca').update({ valor_atual: Number(meta.valor_atual) + v }).eq('id', id);
+    if (error) throw error;
+  });
+}
+
+/* ---------- eventos ---------- */
+function bindView() {
+  document.querySelectorAll('[data-mes]').forEach((b) => (b.onclick = () => { state.mes = addMonths(state.mes, Number(b.dataset.mes)); render(); }));
+  const novo = $('#novo'); if (novo) novo.onclick = () => openTxModal();
+  const nm = $('#nova-meta'); if (nm) nm.onclick = openMetaModal;
+  document.querySelectorAll('[data-dep]').forEach((b) => (b.onclick = () => openDepositModal(b.dataset.dep)));
+  document.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Excluir esta caixinha?')) return;
+    const { error } = await db.from('metas_poupanca').delete().eq('id', b.dataset.del);
+    if (error) toast(error.message); else refresh();
+  }));
+  const ss = $('#scan-start'); if (ss) ss.onclick = startScanner;
+  const sp = $('#scan-stop'); if (sp) sp.onclick = stopScanner;
+}
+
+document.querySelectorAll('.bottom button').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
+$('#eye').onclick = () => {
+  state.hidden = !state.hidden;
+  localStorage.setItem('fa_hidden', state.hidden ? '1' : '0');
+  render();
+};
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+refresh();
