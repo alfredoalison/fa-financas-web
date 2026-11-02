@@ -211,3 +211,13 @@ body.locked { padding-bottom: 0; }
 .login-msg.ok { color: #00FF66; }
 .login-msg.bad { color: var(--neg); }
 .login-err { min-height: 20px; margin: -4px 0 8px; color: var(--neg); font-size: 12px; font-weight: 700; }
+
+/* Detalhes do lançamento */
+.row.clicavel { cursor: pointer; }
+.row.clicavel:active { background: var(--bg); }
+.row.clicavel:focus-visible { outline-offset: -2px; }
+.det-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 4px 0 12px; border-bottom: 1px solid var(--line); }
+.det-valor { font-size: 22px; font-weight: 700; white-space: nowrap; }
+.det-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.det-row small { color: var(--mut); font-size: 11px; }
+.det-row b { text-align: right; word-break: break-word; }
