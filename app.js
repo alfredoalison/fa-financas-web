@@ -241,7 +241,7 @@ function openModal(title, bodyHtml, onSubmit) {
 const optionsHtml = (arr, label, sel) => arr.map((o) => `<option value="${esc(o.id)}"${o.id === sel ? ' selected' : ''}>${esc(o[label])}</option>`).join('');
 
 function openTxModal(pre = {}) {
-  const lastUser = localStorage.getItem('fa_user');
+  const lastUser = meuId() || localStorage.getItem('fa_user');
   const { el } = openModal('NOVO LANÇAMENTO', `
     <div class="field"><label>TIPO</label><select name="tipo">${TIPOS.map((t) => `<option>${t}</option>`).join('')}</select></div>
     <div class="field"><label>QUEM</label><select name="usuario">${optionsHtml(state.usuarios, 'nome', lastUser)}</select></div>
@@ -355,4 +355,134 @@ $('#eye').onclick = () => {
 };
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-refresh();
+/* ---------- LOGIN (CPF + senha de 6 dígitos) ---------- */
+// Os CPFs e senhas NÃO ficam em texto puro: só o hash SHA-256 de cada um.
+// Cadastro: sha256("fa-financas:" + cpf)  e  sha256("fa-financas:" + cpf + ":" + senha)
+const AUTH = {
+  users: {
+    '1af666bf3ae8cafc54ec2885c731af92aff2d93860b31ab75eb242ecef4b0a30': {
+      nome: 'Alfredo Alison', saudacao: 'Bem-vindo',
+      cred: 'dd3087b0df7aeb23058efbfb37b601b232e90e82180c63ef950a8f589a30c12f',
+    },
+    '1a9aef70d972f0fb6162465715135ab5aadeedd19636e08102cae39847cd3fcf': {
+      nome: 'Fernanda Regina', saudacao: 'Bem-vinda',
+      cred: '7962ddba3fa55595174378517c2b972c4ce04d8785e8a5c3e2f4fb65895d9f60',
+    },
+  },
+  maxTentativas: 5,
+  bloqueioMs: 60000,
+};
+
+const sha256 = async (txt) => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(txt));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+const soDigitos = (v) => String(v || '').replace(/\D/g, '');
+const hashCpf = (cpf) => sha256('fa-financas:' + cpf);
+const hashCred = (cpf, senha) => sha256('fa-financas:' + cpf + ':' + senha);
+
+function maskCpf(v) {
+  return soDigitos(v).slice(0, 11)
+    .replace(/(\d{3})(\d)/, '$1.$2')
+    .replace(/(\d{3})(\d)/, '$1.$2')
+    .replace(/(\d{3})(\d{1,2})$/, '$1-$2');
+}
+
+const session = { user: null };
+function meuId() {
+  const nome = session.user?.nome;
+  return nome ? state.usuarios.find((u) => u.nome === nome)?.id : null;
+}
+
+let cpfToken = 0;
+async function reconhecerCpf() {
+  const msg = $('#login-msg');
+  const cpf = soDigitos($('#cpf').value);
+  const token = ++cpfToken;
+  msg.className = 'login-msg';
+  msg.textContent = '';
+  if (cpf.length < 11) return null;
+  const k = await hashCpf(cpf);
+  if (token !== cpfToken) return null; // digitação mais nova já em andamento
+  const user = AUTH.users[k];
+  if (!user) { msg.classList.add('bad'); msg.textContent = 'CPF não autorizado'; return null; }
+  msg.classList.add('ok');
+  msg.textContent = `${user.saudacao}, ${user.nome}`;
+  return { k, user, cpf };
+}
+
+function lockedUntil() { return Number(localStorage.getItem('fa_lock') || 0); }
+
+async function tentarLogin(e) {
+  e.preventDefault();
+  const err = $('#login-err');
+  err.textContent = '';
+  const agora = Date.now();
+  if (lockedUntil() > agora) {
+    err.textContent = `MUITAS TENTATIVAS. AGUARDE ${Math.ceil((lockedUntil() - agora) / 1000)}s.`;
+    return;
+  }
+  const r = await reconhecerCpf();
+  const senha = soDigitos($('#senha').value);
+  if (!r) { err.textContent = 'INFORME UM CPF AUTORIZADO.'; return; }
+  if (senha.length !== 6) { err.textContent = 'A SENHA TEM 6 DÍGITOS.'; return; }
+  const cred = await hashCred(r.cpf, senha);
+  if (cred !== r.user.cred) {
+    const n = Number(localStorage.getItem('fa_fail') || 0) + 1;
+    if (n >= AUTH.maxTentativas) {
+      localStorage.setItem('fa_lock', String(Date.now() + AUTH.bloqueioMs));
+      localStorage.setItem('fa_fail', '0');
+      err.textContent = 'MUITAS TENTATIVAS. AGUARDE 60s.';
+    } else {
+      localStorage.setItem('fa_fail', String(n));
+      err.textContent = 'SENHA INCORRETA.';
+    }
+    $('#senha').value = '';
+    return;
+  }
+  localStorage.setItem('fa_fail', '0');
+  localStorage.setItem('fa_session', JSON.stringify({ k: r.k, c: cred }));
+  entrar(r.user);
+}
+
+function entrar(user) {
+  session.user = user;
+  document.body.classList.remove('locked');
+  $('#login-form').reset();
+  $('#login-msg').textContent = '';
+  $('#login-err').textContent = '';
+  setView('inicio');
+  refresh();
+}
+
+function sair() {
+  stopScanner();
+  document.querySelectorAll('.modal-bg').forEach((m) => m.remove());
+  localStorage.removeItem('fa_session');
+  session.user = null;
+  Object.assign(state, { usuarios: [], cartoes: [], categorias: [], transacoes: [], metas: [] });
+  $('#app').innerHTML = '';
+  document.body.classList.add('locked');
+  window.scrollTo(0, 0);
+  $('#cpf').focus();
+}
+
+function sessaoSalva() {
+  try {
+    const s = JSON.parse(localStorage.getItem('fa_session') || 'null');
+    const user = s && AUTH.users[s.k];
+    return user && user.cred === s.c ? user : null; // valida contra o cadastro atual
+  } catch (_) { return null; }
+}
+
+function initAuth() {
+  $('#cpf').addEventListener('input', (e) => { e.target.value = maskCpf(e.target.value); reconhecerCpf(); });
+  $('#senha').addEventListener('input', (e) => { e.target.value = soDigitos(e.target.value).slice(0, 6); });
+  $('#login-form').addEventListener('submit', tentarLogin);
+  $('#logout').onclick = sair;
+  const user = sessaoSalva();
+  if (user) entrar(user);
+  else { localStorage.removeItem('fa_session'); $('#cpf').focus(); }
+}
+
+initAuth();
