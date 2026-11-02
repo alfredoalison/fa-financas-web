@@ -116,10 +116,18 @@ summary::-webkit-details-marker { display: none; }
 .meta-actions { display: flex; gap: 8px; margin-top: 12px; }
 .meta-actions .btn { flex: 1; padding: 8px; }
 
-/* Scanner */
-#reader { width: 100%; border: 1px solid var(--line); background: var(--bg); min-height: 80px; margin-bottom: 12px; }
-#reader video { width: 100% !important; }
-.scan-out { word-break: break-all; border: 1px solid var(--line); padding: 10px; margin-top: 12px; }
+/* Scanner de comprovantes */
+.scan-desc { margin: 0 0 16px; color: var(--txt); }
+.scan-btns { display: grid; gap: 8px; }
+.preview {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 220px; max-height: 60vh; margin-bottom: 12px; padding: 8px;
+  background: #0D0D0D; border: 2px solid #00FF66; overflow: hidden;
+}
+.preview img { display: block; max-width: 100%; max-height: calc(60vh - 20px); object-fit: contain; }
+.preview-pdf { text-align: center; font-size: 40px; line-height: 1.6; word-break: break-all; }
+.preview-pdf small { display: block; font-size: 12px; color: var(--mut); }
+.btn[disabled] { opacity: .6; cursor: progress; }
 
 /* Navegação inferior */
 .bottom {
