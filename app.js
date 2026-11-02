@@ -4,6 +4,11 @@ const SUPABASE_ANON_KEY = 'sb_publishable_0tnbe4SkERpWhmA4S0pPGw_ozv2ksSC';
 // Apenas a chave anon/publishable fica no front-end. A service role key NUNCA deve entrar aqui.
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Servidor do bot (server.js), que lê a nota com o Gemini. Use '' se o PWA for servido pelo próprio bot.
+// API_TOKEN deve ser igual à variável API_TOKEN do .env do bot.
+const API_URL = 'https://SEU-BOT.onrender.com';
+const API_TOKEN = 'COLOQUE_O_TOKEN_AQUI';
+
 const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const TIPOS = ['DÉBITO', 'CRÉDITO', 'PIX', 'RECEITA'];
 
@@ -17,11 +22,13 @@ const state = {
   hidden: localStorage.getItem('fa_hidden') === '1',
   mes: hoje().slice(0, 7),
   view: 'inicio',
-  scanner: null,
+  scan: null,
+  processando: false,
 };
 
 /* ---------- utilidades ---------- */
 const money = (v) => state.hidden ? 'R$ ••••••' : Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const semAcento = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 const brData = (iso) => String(iso || '').split('-').reverse().join('/');
 const userName = (id) => (state.usuarios.find((u) => u.id === id)?.nome || '—').split(' ')[0];
 const labelMes = (ym) => { const [y, m] = ym.split('-').map(Number); return `${MESES[m - 1]} ${y}`; };
@@ -73,7 +80,6 @@ async function refresh() {
 
 /* ---------- navegação ---------- */
 function setView(v) {
-  if (state.view === 'escanear' && v !== 'escanear') stopScanner();
   state.view = v;
   document.querySelectorAll('.bottom button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
   render();
@@ -176,47 +182,119 @@ function viewMetas() {
     ${cards || '<div class="empty">Nenhuma caixinha criada. Crie uma meta para começar a poupar.</div>'}`;
 }
 
-/* ---------- ESCANEAR ---------- */
+/* ---------- ESCANEAR (foto/PDF de nota ou comprovante) ---------- */
 function viewEscanear() {
+  const sc = state.scan;
+  const corpo = sc
+    ? `<div class="preview">${sc.isPdf
+        ? `<div class="preview-pdf">📄<small>${esc(sc.nome)}</small></div>`
+        : `<img src="${esc(sc.url)}" alt="Pré-visualização da nota">`}</div>
+      <button class="btn primary block" id="scan-go"${state.processando ? ' disabled' : ''}>${state.processando ? 'PROCESSANDO...' : 'PROCESSAR E EXTRAIR DADOS'}</button>
+      <button class="btn block" id="scan-redo" style="margin-top:8px"${state.processando ? ' disabled' : ''}>TIRAR OUTRA FOTO</button>`
+    : `<div class="scan-btns">
+        <button class="btn primary" id="scan-cam">📷 TIRAR FOTO</button>
+        <button class="btn" id="scan-gal">📁 SELECIONAR DA GALERIA</button>
+      </div>`;
   return `<section class="card">
-    <h2>LEITOR DE QR CODE</h2>
-    <div id="reader"></div>
-    <div class="actions">
-      <button class="btn primary" id="scan-start">ABRIR CÂMERA</button>
-      <button class="btn" id="scan-stop">PARAR</button>
-    </div>
-    <div id="scan-out"></div>
+    <h2>CAPTURAR OU ENVIAR NOTA/COMPROVANTE</h2>
+    <p class="scan-desc">Tire uma foto legível do cupom, fatura, conta de água ou recibo para extrair os dados automaticamente.</p>
+    ${corpo}
+    <input type="file" id="in-cam" accept="image/*" capture="environment" hidden>
+    <input type="file" id="in-gal" accept="image/*,application/pdf" hidden>
   </section>
   <section class="card">
-    <h2>NOTA SEM QR CODE?</h2>
-    <p style="margin:0 0 12px">Envie a foto da nota no grupo "F&amp;A Finanças" do WhatsApp. O bot lê os itens e lança sozinho. Na legenda, escreva "pix", "debito" ou "credito nubank 3x" para indicar o pagamento.</p>
+    <h2>PREFERE DIGITAR?</h2>
     <button class="btn block" id="novo">LANÇAR MANUALMENTE</button>
   </section>`;
 }
 
-async function startScanner() {
-  stopScanner();
+function limparScan() {
+  if (state.scan?.url) URL.revokeObjectURL(state.scan.url);
+  state.scan = null;
+  state.processando = false;
+}
+
+function escolherArquivo(file) {
+  if (!file) return;
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+  if (!isPdf && !String(file.type).startsWith('image/')) return toast('Escolha uma foto ou um arquivo PDF.');
+  if (file.size > 25 * 1024 * 1024) return toast('Arquivo muito grande (máx. 25 MB).');
+  limparScan();
+  state.scan = { file, isPdf, nome: file.name || 'comprovante.pdf', url: isPdf ? null : URL.createObjectURL(file) };
+  render();
+}
+
+function bindScan() {
+  const cam = $('#in-cam'), gal = $('#in-gal');
+  if (!cam || !gal) return;
+  const pegar = (inp) => () => { const f = inp.files[0]; inp.value = ''; escolherArquivo(f); };
+  cam.onchange = pegar(cam);
+  gal.onchange = pegar(gal);
+  const bc = $('#scan-cam'); if (bc) bc.onclick = () => cam.click();
+  const bg = $('#scan-gal'); if (bg) bg.onclick = () => gal.click();
+  const br = $('#scan-redo'); if (br) br.onclick = () => cam.click(); // o preview atual é trocado ao tirar a nova foto
+  const go = $('#scan-go'); if (go) go.onclick = processarScan;
+}
+
+// Reduz a foto (lado maior 1800 px, JPEG) para o envio ser rápido no 4G. PDF segue como está.
+async function arquivoParaEnvio(file, isPdf) {
+  if (isPdf) return { mime: 'application/pdf', blob: file };
   try {
-    state.scanner = new Html5Qrcode('reader');
-    await state.scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: 240 }, async (texto) => {
-      await stopScanner();
-      const isUrl = /^https?:\/\//i.test(texto);
-      $('#scan-out').innerHTML = `<div class="scan-out"><b>QR lido:</b><br>${esc(texto)}
-        <div class="actions" style="margin-top:10px">
-          ${isUrl ? `<a class="btn" href="${esc(texto)}" target="_blank" rel="noopener noreferrer">ABRIR NOTA</a>` : ''}
-          <button class="btn primary" id="scan-launch">LANÇAR</button>
-        </div></div>`;
-      $('#scan-launch').onclick = () => openTxModal({ estab: isUrl ? 'NFC-e (QR Code)' : texto.slice(0, 60) });
-    }, () => {});
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k);
+    c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.88));
+    if (blob) return { mime: 'image/jpeg', blob };
+  } catch (_) { /* formato que o navegador não decodifica: envia o original */ }
+  return { mime: file.type || 'image/jpeg', blob: file };
+}
+
+const blobParaBase64 = (blob) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(',')[1]);
+  r.onerror = () => rej(new Error('Não consegui ler o arquivo.'));
+  r.readAsDataURL(blob);
+});
+
+async function processarScan() {
+  const sc = state.scan;
+  if (!sc || state.processando) return;
+  if (API_URL.includes('SEU-BOT') || API_TOKEN.includes('COLOQUE')) {
+    return toast('Configure API_URL e API_TOKEN no topo do app.js para extrair os dados.');
+  }
+  state.processando = true;
+  render();
+  try {
+    const { mime, blob } = await arquivoParaEnvio(sc.file, sc.isPdf);
+    if (blob.size > 12 * 1024 * 1024) throw new Error('Arquivo muito grande para enviar (máx. 12 MB). Tire a foto de novo.');
+    const resp = await fetch(`${API_URL}/api/extrair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-fa-token': API_TOKEN },
+      body: JSON.stringify({ mime, data: await blobParaBase64(blob) }),
+    });
+    const json = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(json.erro || `Erro ${resp.status} ao extrair os dados.`);
+    limparScan();
+    render();
+    abrirLancamentoExtraido(json);
   } catch (e) {
-    toast('Não foi possível abrir a câmera. Libere a permissão no navegador e use HTTPS ou localhost.');
+    state.processando = false;
+    render();
+    toast(e instanceof TypeError ? 'Não consegui falar com o servidor do bot. Confira a internet e o API_URL.' : (e.message || String(e)));
   }
 }
 
-async function stopScanner() {
-  const s = state.scanner;
-  state.scanner = null;
-  if (s) { try { await s.stop(); s.clear(); } catch (_) { /* já parado */ } }
+function abrirLancamentoExtraido(n) {
+  const tipo = n.tipo_documento === 'pix_recebido' ? 'RECEITA' : n.tipo_documento === 'pix_enviado' ? 'PIX' : 'DÉBITO';
+  const cat = state.categorias.find((c) => semAcento(c.nome) === semAcento(n.categoria));
+  openTxModal({
+    titulo: 'CONFIRMAR DADOS EXTRAÍDOS',
+    estab: n.estabelecimento, valor: Number(n.valor_total) || 0, data: n.data,
+    tipo, categoriaId: cat?.id, itens: n.itens || [],
+  });
 }
 
 /* ---------- Modais ---------- */
@@ -242,15 +320,16 @@ const optionsHtml = (arr, label, sel) => arr.map((o) => `<option value="${esc(o.
 
 function openTxModal(pre = {}) {
   const lastUser = meuId() || localStorage.getItem('fa_user');
-  const { el } = openModal('NOVO LANÇAMENTO', `
+  const { el } = openModal(pre.titulo || 'NOVO LANÇAMENTO', `
     <div class="field"><label>TIPO</label><select name="tipo">${TIPOS.map((t) => `<option>${t}</option>`).join('')}</select></div>
     <div class="field"><label>QUEM</label><select name="usuario">${optionsHtml(state.usuarios, 'nome', lastUser)}</select></div>
-    <div class="field"><label>VALOR TOTAL (R$)</label><input name="valor" inputmode="decimal" placeholder="0,00" required></div>
+    <div class="field"><label>VALOR TOTAL (R$)</label><input name="valor" inputmode="decimal" placeholder="0,00" value="${pre.valor ? pre.valor.toFixed(2).replace('.', ',') : ''}" required></div>
     <div class="field cred hidden"><label>CARTÃO</label><select name="cartao">${optionsHtml(state.cartoes, 'nome_cartao')}</select></div>
     <div class="field cred hidden"><label>PARCELAS</label><input name="parcelas" type="number" min="1" max="24" value="1"></div>
-    <div class="field cat"><label>CATEGORIA</label><div class="inline"><select name="categoria">${optionsHtml(state.categorias, 'nome')}</select><button type="button" class="btn" id="nova-cat">+ NOVA</button></div></div>
+    <div class="field cat"><label>CATEGORIA</label><div class="inline"><select name="categoria">${optionsHtml(state.categorias, 'nome', pre.categoriaId)}</select><button type="button" class="btn" id="nova-cat">+ NOVA</button></div></div>
     <div class="field"><label>ESTABELECIMENTO / DESCRIÇÃO</label><input name="estab" value="${esc(pre.estab || '')}"></div>
-    <div class="field"><label>DATA</label><input name="data" type="date" value="${hoje()}" required></div>`,
+    <div class="field"><label>DATA</label><input name="data" type="date" value="${pre.data || hoje()}" required></div>
+    ${pre.itens?.length ? `<div class="field"><small style="color:var(--mut)">${pre.itens.length} ITEM(NS) DA NOTA SERÃO ANEXADOS</small></div>` : ''}`,
   async (fd) => {
     const tipo = fd.get('tipo');
     const valor = parseFloat(String(fd.get('valor')).replace(/\./g, '').replace(',', '.')) || parseFloat(String(fd.get('valor')).replace(',', '.'));
@@ -278,8 +357,16 @@ function openTxModal(pre = {}) {
     } else {
       rows.push({ ...base, valor_total: valor, parcelado: false });
     }
-    const { error } = await db.from('transacoes').insert(rows);
+    const { data: inseridas, error } = await db.from('transacoes').insert(rows).select('id,parcela_atual');
     if (error) throw error;
+    if (pre.itens?.length) { // itens ficam na primeira parcela (ou na única transação)
+      const prim = inseridas.find((t) => (t.parcela_atual || 1) === 1) || inseridas[0];
+      const { error: errItens } = await db.from('itens_transacao').insert(pre.itens.map((i) => ({
+        transacao_id: prim.id, nome_produto: i.nome_produto, quantidade: i.quantidade,
+        valor_unitario: i.valor_unitario, valor_total: i.valor_total,
+      })));
+      if (errItens) throw errItens;
+    }
   });
 
   const sel = $('[name=tipo]', el);
@@ -287,6 +374,7 @@ function openTxModal(pre = {}) {
     el.querySelectorAll('.cred').forEach((f) => f.classList.toggle('hidden', sel.value !== 'CRÉDITO'));
     $('.cat', el).classList.toggle('hidden', sel.value === 'RECEITA');
   };
+  if (pre.tipo) sel.value = pre.tipo;
   sel.onchange = toggle;
   toggle();
 
@@ -343,8 +431,7 @@ function bindView() {
     const { error } = await db.from('metas_poupanca').delete().eq('id', b.dataset.del);
     if (error) toast(error.message); else refresh();
   }));
-  const ss = $('#scan-start'); if (ss) ss.onclick = startScanner;
-  const sp = $('#scan-stop'); if (sp) sp.onclick = stopScanner;
+  bindScan();
 }
 
 document.querySelectorAll('.bottom button').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
@@ -456,7 +543,7 @@ function entrar(user) {
 }
 
 function sair() {
-  stopScanner();
+  limparScan();
   document.querySelectorAll('.modal-bg').forEach((m) => m.remove());
   localStorage.removeItem('fa_session');
   session.user = null;
