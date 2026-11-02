@@ -360,9 +360,9 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
 // Cadastro: sha256("fa-financas:" + cpf)  e  sha256("fa-financas:" + cpf + ":" + senha)
 const AUTH = {
   users: {
-    '1af666bf3ae8cafc54ec2885c731af92aff2d93860b31ab75eb242ecef4b0a30': {
+    'f00daf346ffece9efb262d4abad4f928c7b3bcc54f944642dd2677ec825dfb19': {
       nome: 'Alfredo Alison', saudacao: 'Bem-vindo',
-      cred: 'dd3087b0df7aeb23058efbfb37b601b232e90e82180c63ef950a8f589a30c12f',
+      cred: 'ed30009534baad6541ba500f13b6f737d5050c2ed0d3bff15503f1a28cf35fd9',
     },
     '1a9aef70d972f0fb6162465715135ab5aadeedd19636e08102cae39847cd3fcf': {
       nome: 'Fernanda Regina', saudacao: 'Bem-vinda',
